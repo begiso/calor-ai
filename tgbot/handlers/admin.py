@@ -1,6 +1,9 @@
 import os
+import sqlite3
+from datetime import datetime, date
+
 from aiogram import Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 from tgbot.filters.admin import AdminFilter
@@ -17,7 +20,78 @@ async def admin_panel(message: Message):
                        "Доступные команды:\n"
                        "/admin - эта панель\n"
                        "/stats - статистика бота\n"
-                       "/dbclear - очистить базу данных")
+                       "/user <code>ID</code> - инфо о пользователе\n"
+                       "/dbclear - очистить базу данных",
+                       parse_mode='HTML')
+
+
+@admin_router.message(Command("user"))
+async def user_info(message: Message, command: CommandObject):
+    """Информация о конкретном пользователе по ID"""
+    if not command.args:
+        await message.reply("Использование: /user <code>ID</code>\nПример: /user 123456789", parse_mode='HTML')
+        return
+
+    try:
+        target_id = int(command.args.strip())
+    except ValueError:
+        await message.reply("❌ ID должен быть числом.")
+        return
+
+    user_model = UserModel()
+    meal_model = MealModel()
+    user = user_model.get_user(target_id)
+
+    if not user:
+        await message.reply(f"❌ Пользователь <code>{target_id}</code> не найден.", parse_mode='HTML')
+        return
+
+    gender_map = {"male": "👨 Мужчина", "female": "👩 Женщина"}
+    lang_map = {"ru": "🇷🇺 Русский", "uz": "🇺🇿 O'zbek"}
+
+    # Возраст
+    age = "—"
+    if user.get('birth_date'):
+        try:
+            bd = datetime.strptime(user['birth_date'], "%Y-%m-%d").date()
+            today = date.today()
+            age = today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day))
+        except Exception:
+            age = "—"
+
+    # Статистика приёмов пищи
+    today_stats = meal_model.get_daily_stats(target_id)
+    with sqlite3.connect(user_model.db_path) as conn:
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM meals WHERE user_id = ? AND status = 'confirmed'",
+            (target_id,)
+        )
+        total_meals = cursor.fetchone()[0]
+
+    onboarding = "✅" if user_model.is_onboarding_complete(target_id) else "❌"
+
+    text = (
+        f"👤 <b>Пользователь</b> <code>{target_id}</code>\n\n"
+        f"<b>Профиль:</b>\n"
+        f"  Язык: {lang_map.get(user.get('language'), '—')}\n"
+        f"  Пол: {gender_map.get(user.get('gender'), '—')}\n"
+        f"  Возраст: {age}\n"
+        f"  Рост: {user.get('height') or '—'} см\n"
+        f"  Вес: {user.get('weight') or '—'} кг\n"
+        f"  Онбординг: {onboarding}\n\n"
+        f"<b>Норма:</b>\n"
+        f"  🔥 {user.get('daily_calories') or 0} ккал\n"
+        f"  Б: {user.get('daily_proteins') or 0} г | "
+        f"Ж: {user.get('daily_fats') or 0} г | "
+        f"У: {user.get('daily_carbs') or 0} г\n\n"
+        f"<b>Сегодня:</b>\n"
+        f"  Съедено: {int(today_stats['total_calories'])} ккал\n"
+        f"  Приёмов пищи сегодня: {today_stats['meal_count']}\n"
+        f"  Всего приёмов за всё время: {total_meals}\n\n"
+        f"<b>Регистрация:</b> {user.get('created_at', '—')}"
+    )
+
+    await message.reply(text, parse_mode='HTML')
 
 
 @admin_router.message(Command("stats"))
@@ -32,9 +106,6 @@ async def show_stats(message: Message):
         completed_users = user_model.get_completed_onboarding_count()
         users_by_lang = user_model.get_users_by_language()
 
-        # Получаем статистику по приемам пищи
-        from datetime import datetime
-        import sqlite3
         today = datetime.now().date().isoformat()
 
         # Подсчитываем приемы пищи за сегодня
